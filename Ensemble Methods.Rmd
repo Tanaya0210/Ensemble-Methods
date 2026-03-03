@@ -1,0 +1,1210 @@
+# Packages
+```{r}
+set.seed(42)
+
+install.packages("tidyverse")
+install.packages("rpart.plot")
+install.packages("pROC")
+install.packages("caret")
+install.packages("randomForest")
+install.packages("factoextra")
+install.packages("ggplot2")
+
+library(factoextra)
+library(ggplot2)
+library(tidyverse)
+library(rpart)
+library(rpart.plot)
+library(pROC)
+library(caret)
+library(ipred) 
+library(randomForest)  
+library(gbm)           
+```
+
+# Features
+id (Unique id for each patient)
+age (Age of the patient in years)
+origin (place of study)
+sex (Male/Female)
+cp chest pain type ([typical angina, atypical angina, non-anginal, asymptomatic])
+trestbps resting blood pressure (resting blood pressure (in mm Hg on admission to the hospital))
+chol (serum cholesterol in mg/dl)
+fbs (if fasting blood sugar > 120 mg/dl)
+restecg (resting electrocardiographic results)
+-- Values: [normal, stt abnormality, lv hypertrophy]
+thalach: maximum heart rate achieved
+exang: exercise-induced angina (True/ False)
+oldpeak: ST depression induced by exercise relative to rest
+slope: the slope of the peak exercise ST segment
+ca: number of major vessels (0-3) colored by fluoroscopy
+thal: [normal; fixed defect; reversible defect]
+num: the predicted attribute
+
+#Data preprocseeing 
+```{r}
+# Heart dataset (UCI version mirrored on GitHub)
+heart <- read.csv("https://raw.githubusercontent.com/sharmaroshan/Heart-UCI-Dataset/master/heart.csv")
+
+# Quick check
+glimpse(heart)
+summary(heart)
+
+# Ensure target is factor for classification
+heart$target <- factor(heart$target, levels=c(0,1), labels=c("NoDisease","Disease"))
+
+# NA handling 
+heart <- heart %>% drop_na()
+anyNA(heart)
+```
+
+# Visualization of the Dataset
+```{r}
+ggplot(heart, aes(target, fill = target)) +
+  geom_bar() +
+  scale_fill_manual(values = c("#4C9F70", "#D95F5F")) +
+  theme_minimal(base_size = 14) +
+  labs(title="Target Distribution", x="Condition", y="Count")
+
+library(reshape2)
+
+# Convert target to numeric (NoDisease = 0, Disease = 1)
+heart_corr <- heart %>%
+  mutate(target_num = ifelse(target == "Disease", 1, 0)) %>%
+  select(where(is.numeric), target_num)
+
+cor_mat <- cor(heart_corr)
+
+# Visualisation
+ggplot(melt(cor_mat), aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low="#2166AC", mid="white", high="#B2182B", midpoint=0) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle=45, hjust=1),
+        axis.title = element_blank()) +
+  labs(title = "Correlation Heatmap (Including Target)")
+```
+
+# PCA 
+```{r}
+library(tidyverse)
+
+numeric_features <- heart %>%
+  select(-target) %>%
+  select(where(is.numeric))
+
+pca_scaled <- scale(numeric_features)
+
+pca_model <- prcomp(pca_scaled, center = TRUE, scale. = TRUE)
+
+pca_two <- as.data.frame(pca_model$x[, 1:2])
+colnames(pca_two) <- c("PC1", "PC2")
+
+heart_pca2 <- cbind(pca_two, target = heart$target)
+
+glimpse(heart_pca2)
+summary(heart_pca2)
+```
+
+# PCA Visualization
+```{r}
+numeric_features <- heart[, sapply(heart, is.numeric)]
+numeric_features <- numeric_features[, !(colnames(numeric_features) == "target")]
+
+pca_scaled <- scale(numeric_features)
+pca_model <- prcomp(pca_scaled, center = TRUE, scale. = TRUE)
+
+# Scree plot
+fviz_eig(pca_model, addlabels = TRUE, barfill = "#2C7FB8", barcolor = "white") +
+  ggtitle("Scree Plot: Explained Variance by PCA Components")
+
+fviz_pca_var(
+  pca_model,
+  col.var = "black",     
+  repel = TRUE           
+) +
+  ggtitle("PCA Variable Contribution Plot (PC1 vs PC2)")
+
+fviz_pca_biplot(
+  pca_model,
+  geom.ind = "point",
+  pointshape = 21,
+  pointsize = 2,
+  fill.ind = heart$target,
+  col.ind = "black",
+  col.var = "black",
+  repel = TRUE
+)
+```
+
+# Spilt the Datasest into 7:3
+```{r}
+set.seed(42)
+
+train_index <- sample(1:nrow(heart_pca2), 0.7 * nrow(heart_pca2))
+train <- heart_pca2[train_index, ]
+test <- heart_pca2[-train_index, ]
+```
+
+# Tree (Baseline model)
+```{r}
+tree_fit <- rpart(target ~ ., data=train, method="class", minsplit=2, minbucket=1,cp=0)
+rpart.plot(tree_fit, type=2, extra=104, fallen.leaves=TRUE, main = "Baseline Decision Tree")
+
+pred_class <- predict(tree_fit, test, type="class")
+
+# Probability prediction 
+pred_prob <- predict(tree_fit, test, type="prob")[, "Disease"]
+
+# Accuracy + F1 score
+conf_matrix <- confusionMatrix(pred_class, test$target)
+conf_matrix
+
+# ROC Curve
+roc_tree <- roc(test$target, pred_prob)
+plot(roc_tree, col="#1F78B4", lwd=2, main = "ROC Curve – Decision Tree")
+roc_auc <- auc(roc_tree)
+
+# Cross-Entropy (Log Loss)
+y_true <- ifelse(test$target == "Disease", 1, 0)
+epsilon <- 1e-15  
+pred_prob_safe <- pmin(pmax(pred_prob, epsilon), 1 - epsilon)
+
+log_loss <- -mean(y_true * log(pred_prob_safe) + (1 - y_true) * log(1 - pred_prob_safe))
+log_loss
+
+# Store the results in a list
+results <- list(
+  Accuracy      = conf_matrix$overall["Accuracy"],
+  F1_Score      = conf_matrix$byClass["F1"],
+  ROC_AUC       = roc_auc,
+  Cross_Entropy = log_loss
+)
+
+results
+```
+
+# Boundaries Graph for Tree
+```{r}
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+
+tree_fit <- rpart(target ~ PC1 + PC2, data=train, method="class", minsplit=2, minbucket=1, cp=0)
+
+# Create a grid of points covering the PCA space
+x_range <- seq(min(test$PC1), max(test$PC1), length.out = 500)
+y_range <- seq(min(test$PC2), max(test$PC2), length.out = 500)
+
+# Create a meshgrid of these points
+grid <- expand.grid(PC1 = x_range, PC2 = y_range)
+
+# Predict the class labels for each point on the grid
+grid$pred_class <- predict(tree_fit, newdata = grid, type = "class")
+
+# Plot the decision boundaries
+ggplot() +
+  geom_tile(data = grid, aes(x = PC1, y = PC2, fill = pred_class), alpha = 0.3) +  
+  geom_point(data = test, aes(x = PC1, y = PC2, color = target), size = 3) +  
+  scale_color_manual(values = c("NoDisease" = "blue", "Disease" = "red")) +  
+  scale_fill_manual(values = c("NoDisease" = "lightblue", "Disease" = "lightcoral")) +
+  labs(title = "Decision Tree: PCA-based Decision Boundaries", x = "PC1", y = "PC2") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  theme(legend.title = element_blank())
+```
+
+# Tree ROC (train vs test set)
+```{r}
+tree_fit <- rpart(target ~ ., data=train, method="class", minsplit=2, minbucket=1,cp=0)
+rpart.plot(tree_fit, type=2, extra=104, fallen.leaves=TRUE, main = "Baseline Decision Tree")
+
+pred_class <- predict(tree_fit, test, type="class")
+pred_prob_test <- predict(tree_fit, test, type="prob")[, "Disease"]
+pred_prob_train <- predict(tree_fit, train, type="prob")[, "Disease"]
+
+# Accuracy and F1 score for test data
+confusionMatrix(pred_class, test$target)
+
+# ROC curve for test data
+roc_tree_test <- roc(test$target, pred_prob_test)
+plot(roc_tree_test, col="#1F78B4", lwd=2,
+     main = "ROC Curve – Decision Tree")
+
+# ROC curve for training data
+roc_tree_train <- roc(train$target, pred_prob_train)
+lines(roc_tree_train, col="#FF6347", lwd=2)
+
+# AUC for both training and test data
+auc_test <- auc(roc_tree_test)
+auc_train <- auc(roc_tree_train)
+
+# Add AUC values to the plot
+legend("bottomright", 
+       legend = c(paste("Test AUC = ", round(auc_test, 3)), paste("Train AUC = ", round(auc_train, 3))),
+       col = c("#1F78B4", "#FF6347"), lwd = 2)
+
+# Cross-Entropy (Log Loss) for test data
+y_true <- ifelse(test$target == "Disease", 1, 0)
+epsilon <- 1e-15  
+pred_prob_safe <- pmin(pmax(pred_prob, epsilon), 1 - epsilon)
+
+# Calculate Cross-Entropy (Log Loss)
+log_loss <- -mean(y_true * log(pred_prob_safe) + (1 - y_true) * log(1 - pred_prob_safe))
+
+log_loss
+```
+
+# Tree Result
+```{r}
+results <- list(
+  Accuracy      = confusionMatrix(pred_class, test$target)$overall["Accuracy"],
+  F1_Score      = confusionMatrix(pred_class, test$target)$byClass["F1"],
+  ROC_AUC       = auc(roc_tree),
+  Cross_Entropy = log_loss
+)
+
+results
+```
+
+# Bagging (Baseline)
+```{r}
+set.seed(42)
+
+bag_basic <- bagging(
+  target ~ .,
+  data = train,
+  nbagg = 25 
+)
+
+bag_pred_class <- predict(bag_basic, test, type="class")
+bag_pred_prob <- predict(bag_basic, test, type="prob")[, "Disease"]
+
+# Confusion matrix
+bag_cm <- confusionMatrix(bag_pred_class, test$target)
+bag_cm
+
+# ROC
+roc_bag <- roc(test$target, bag_pred_prob)
+plot(
+  roc_bag,
+  col = "#33A02C", lwd = 2,
+  main = "ROC Curve – Bagging Model"
+)
+auc(roc_bag)
+
+# Cross-Entropy (Log Loss) 
+
+y_true <- ifelse(test$target == "Disease", 1, 0)
+
+epsilon <- 1e-15
+bag_prob_safe <- pmin(pmax(bag_pred_prob, epsilon), 1 - epsilon)
+
+bag_logloss <- -mean(
+  y_true * log(bag_prob_safe) +
+    (1 - y_true) * log(1 - bag_prob_safe)
+)
+
+# Results List (same format as tree)
+bag_results <- list(
+  Accuracy      = bag_cm$overall["Accuracy"],
+  F1_Score      = bag_cm$byClass["F1"],
+  ROC_AUC       = auc(roc_bag),
+  Cross_Entropy = bag_logloss
+)
+
+bag_results
+```
+
+
+```{r}
+set.seed(42)
+
+bag_basic <- bagging(
+  target ~ .,
+  data = train,
+  nbagg = 25
+)
+
+bag_pred_prob_test  <- predict(bag_basic, test,  type = "prob")[, "Disease"]
+bag_pred_prob_train <- predict(bag_basic, train, type = "prob")[, "Disease"]
+
+roc_bag_test  <- roc(test$target,  bag_pred_prob_test,  levels = c("NoDisease","Disease"), direction = "<")
+roc_bag_train <- roc(train$target, bag_pred_prob_train, levels = c("NoDisease","Disease"), direction = "<")
+
+plot(
+  roc_bag_test,
+  col = "#33A02C", lwd = 2,
+  main = "ROC Curve – Bagging Model (Train vs Test)"
+)
+lines(roc_bag_train, col = "#FF6347", lwd = 2)
+
+auc_test  <- auc(roc_bag_test)
+auc_train <- auc(roc_bag_train)
+
+legend(
+  "bottomright",
+  legend = c(
+    paste("Test  AUC =", round(auc_test, 3)),
+    paste("Train AUC =", round(auc_train, 3))
+  ),
+  col = c("#33A02C", "#FF6347"),
+  lwd = 2
+)
+```
+
+# Tuning the Bagging (no. of bag) 
+
+# AUC vs no. of tree
+```{r}
+nbagg_values <- c(10, 25, 50, 100, 150, 200, 250, 300)
+
+bag_results <- data.frame()
+
+for (n in nbagg_values) {
+  set.seed(42)
+  model <- bagging(target ~ ., data=train, nbagg = n, coob = TRUE)
+  
+  pred_prob <- predict(model, test, type="prob")[, "Disease"]
+  auc_val <- auc(roc(test$target, pred_prob))
+  
+  bag_results <- rbind(bag_results,
+    data.frame(nbagg = n, AUC = auc_val)
+  )
+}
+
+# Find the best AUC value and corresponding nbagg
+best_row <- bag_results[which.max(bag_results$AUC), ]
+best_nbagg <- best_row$nbagg
+best_auc <- best_row$AUC
+
+# Plot the AUC values
+ggplot(bag_results, aes(x = nbagg, y = AUC)) +
+  geom_line(color = "#1F78B4", size = 1.2) +
+  geom_point(color = "#1F78B4", size = 3) +
+  
+  # Add a vertical line at the best AUC value
+  geom_vline(xintercept = best_nbagg, linetype = "dashed", color = "red", size = 1) +
+  
+  # Highlight the best AUC point
+  geom_point(aes(x = best_nbagg, y = best_auc), color = "red", size = 4) +
+
+  
+  scale_x_continuous(breaks = bag_results$nbagg) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Bagging Tuning: Number of Trees vs AUC",
+    x = "Number of Trees (nbagg)",
+    y = "AUC"
+  )
+```
+
+# Accuracy VS no. of tree
+```{r}
+library(caret)
+library(ggplot2)
+
+nbagg_values <- c(10, 25, 50, 100, 150, 200)
+
+bag_results <- data.frame()
+
+for (n in nbagg_values) {
+  set.seed(42)
+  
+  model <- bagging(target ~ ., data = train, nbagg = n, coob = TRUE)
+  
+  pred_prob <- predict(model, test, type = "prob")[, "Disease"]
+  
+  pred_class <- ifelse(pred_prob > 0.5, "Disease", "NoDisease")
+  pred_class <- factor(pred_class, levels = c("NoDisease", "Disease"))
+  
+  acc_val <- confusionMatrix(pred_class, test$target)$overall["Accuracy"]
+  
+  bag_results <- rbind(
+    bag_results,
+    data.frame(nbagg = n, Accuracy = acc_val)
+  )
+}
+
+# Identify best nbagg
+best_row <- bag_results[which.max(bag_results$Accuracy), ]
+best_nbagg <- best_row$nbagg
+best_acc   <- best_row$Accuracy
+
+bag_results
+
+ggplot(bag_results, aes(x = nbagg, y = Accuracy)) +
+  geom_line(color = "#1F78B4", size = 1.2) +
+  geom_point(color = "#1F78B4", size = 3) +
+  
+  # Vertical line marking the best nbagg
+  geom_vline(xintercept = best_nbagg, linetype = "dashed", color = "red", size = 1) +
+  
+  # Highlight the best point
+  geom_point(aes(x = best_nbagg, y = best_acc), 
+             color = "red", size = 4) +
+  
+  # Text label above the best point
+  geom_text(aes(x = best_nbagg, y = best_acc, 
+                label = paste0("Best: nbagg=", best_nbagg, "\nAcc=", round(best_acc, 3))),
+            vjust = -1, color = "red", size = 5) +
+  
+  scale_x_continuous(breaks = seq(0, 200, 20)) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Bagging Tuning: Number of Trees vs Accuracy",
+    x = "Number of Trees (nbagg)",
+    y = "Accuracy"
+  )
+```
+
+# This uses cross-entropy as preformance matrix vs no. of tree
+```{r}
+library(caret)
+library(ggplot2)
+
+nbagg_values <- c(10, 25, 50, 100, 150, 200)
+
+bag_results <- data.frame()
+
+for (n in nbagg_values) {
+  set.seed(42)
+  
+  model <- bagging(target ~ ., data = train, nbagg = n, coob = TRUE)
+  
+
+  pred_prob <- predict(model, test, type = "prob")[, "Disease"]
+  y_true <- ifelse(test$target == "Disease", 1, 0)
+  
+  # Cross entropy 
+  epsilon <- 1e-15
+  pred_prob_safe <- pmin(pmax(pred_prob, epsilon), 1 - epsilon)
+  
+  logloss_val <- -mean(
+    y_true * log(pred_prob_safe) +
+      (1 - y_true) * log(1 - pred_prob_safe)
+  )
+  
+  bag_results <- rbind(
+    bag_results,
+    data.frame(nbagg = n, LogLoss = logloss_val)
+  )
+}
+
+# Identify best nbagg (lowest log loss)
+best_row <- bag_results[which.min(bag_results$LogLoss), ]
+best_nbagg <- best_row$nbagg
+best_logloss <- best_row$LogLoss
+
+bag_results
+
+# Plot with best value highlighted
+ggplot(bag_results, aes(x = nbagg, y = LogLoss)) +
+  geom_line(color = "#1F78B4", size = 1.2) +
+  geom_point(color = "#1F78B4", size = 3) +
+
+  # Vertical line marking the best nbagg
+  geom_vline(xintercept = best_nbagg, linetype = "dashed", 
+             color = "red", size = 1) +
+
+  # Highlight the best point
+  geom_point(aes(x = best_nbagg, y = best_logloss), 
+             color = "red", size = 4) +
+
+  # Text label
+  geom_text(aes(x = best_nbagg, y = best_logloss,
+                label = paste0("Best: nbagg=", best_nbagg,
+                               "\nLogLoss=", round(best_logloss, 4))),
+            vjust = -1, color = "red", size = 5) +
+
+  scale_x_continuous(breaks = seq(0, 200, 20)) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Bagging Tuning: Number of Trees vs Cross-Entropy (Log Loss)",
+    x = "Number of Trees (nbagg)",
+    y = "Cross-Entropy (Log Loss)"
+  )
+```
+
+# Try add minsplit=2, minbucket=1,cp=0 that same wtih previosu in tree
+```{r}
+set.seed(42)
+
+bag_basic <- bagging(
+  target ~ .,
+  data = train,
+  nbagg = 150,
+  coob = TRUE, # This is Out-of-Bag (OOB) Error, since average 63% of data used to train in each bootstrap, remaining data is OOB, each tree can predict those data, it is already another form of cv
+  control=rpart.control(method="class",minsplit=2, minbucket=1,cp=0)
+
+)
+
+bag_pred_class <- predict(bag_basic, test, type="class")
+bag_pred_prob <- predict(bag_basic, test, type="prob")[, "Disease"]
+
+# Accuracy + F1 Score
+
+bag_cm <- confusionMatrix(bag_pred_class, test$target)
+bag_cm
+
+# ROC + AUC
+
+roc_bag <- roc(test$target, bag_pred_prob)
+
+plot(
+  roc_bag,
+  col = "#33A02C", lwd = 2,
+  main = "ROC Curve – Bagging Model"
+)
+
+auc(roc_bag)
+
+# Cross-Entropy (Log Loss) 
+
+y_true <- ifelse(test$target == "Disease", 1, 0)
+
+epsilon <- 1e-15
+bag_prob_safe <- pmin(pmax(bag_pred_prob, epsilon), 1 - epsilon)
+
+bag_logloss <- -mean(
+  y_true * log(bag_prob_safe) +
+    (1 - y_true) * log(1 - bag_prob_safe)
+)
+
+# Mean Squared Error
+
+bag_mse <- mean((y_true - bag_prob_safe)^2)
+
+# Results List (same format as tree)
+bag_results <- list(
+  Accuracy      = bag_cm$overall["Accuracy"],
+  F1_Score      = bag_cm$byClass["F1"],
+  ROC_AUC       = auc(roc_bag),
+  Cross_Entropy = bag_logloss
+)
+
+bag_results
+```
+
+# Used the best parameter for prediction of Bagging
+```{r}
+set.seed(42)
+
+bag_basic <- bagging(
+  target ~ .,
+  data = train,
+  nbagg = 150,
+  coob = TRUE, # This is Out-of-Bag (OOB) Error, since average 63% of data used to train in each bootstrap, remaining data is OOB, each tree can predict those data, it is already another form of cv
+  #control=rpart.control(method="class",minsplit=2, minbucket=1,cp=0)
+)
+
+bag_pred_class <- predict(bag_basic, test, type="class")
+bag_pred_prob <- predict(bag_basic, test, type="prob")[, "Disease"]
+
+# Accuracy + F1 Score
+
+bag_cm <- confusionMatrix(bag_pred_class, test$target)
+bag_cm
+
+# ROC + AUC
+
+roc_bag <- roc(test$target, bag_pred_prob)
+
+plot(
+  roc_bag,
+  col = "#33A02C", lwd = 2,
+  main = "ROC Curve – Bagging Model"
+)
+
+auc(roc_bag)
+
+# Cross-Entropy (Log Loss) 
+
+y_true <- ifelse(test$target == "Disease", 1, 0)
+
+epsilon <- 1e-15
+bag_prob_safe <- pmin(pmax(bag_pred_prob, epsilon), 1 - epsilon)
+
+bag_logloss <- -mean(
+  y_true * log(bag_prob_safe) +
+    (1 - y_true) * log(1 - bag_prob_safe)
+)
+
+# Mean Squared Error
+
+bag_mse <- mean((y_true - bag_prob_safe)^2)
+
+# Results List (same format as tree)
+bag_results <- list(
+  Accuracy      = bag_cm$overall["Accuracy"],
+  F1_Score      = bag_cm$byClass["F1"],
+  ROC_AUC       = auc(roc_bag),
+  Cross_Entropy = bag_logloss
+)
+
+bag_results
+```
+
+#Bagging ROC (train vs test)
+```{r}
+set.seed(42)
+
+bag_basic <- bagging(
+  target ~ .,
+  data = train,
+  nbagg = 150,
+  coob = TRUE
+)
+
+bag_pred_class <- predict(bag_basic, test, type="class")
+bag_pred_prob_test <- predict(bag_basic, test, type="prob")[, "Disease"]
+
+bag_pred_prob_train <- predict(bag_basic, train, type="prob")[, "Disease"]
+
+bag_cm <- confusionMatrix(bag_pred_class, test$target)
+bag_cm
+
+roc_bag_test <- roc(test$target, bag_pred_prob_test)
+plot(roc_bag_test, col="#33A02C", lwd=2, main = "ROC Curve – Bagging Model")
+
+roc_bag_train <- roc(train$target, bag_pred_prob_train)
+lines(roc_bag_train, col="#FF6347", lwd=2)
+
+auc_test <- auc(roc_bag_test)
+auc_train <- auc(roc_bag_train)
+
+legend("bottomright", 
+       legend = c(paste("Test AUC = ", round(auc_test, 3)), paste("Train AUC = ", round(auc_train, 3))),
+       col = c("#33A02C", "#FF6347"), lwd = 2)
+
+y_true_test <- ifelse(test$target == "Disease", 1, 0)
+epsilon <- 1e-15
+bag_prob_safe_test <- pmin(pmax(bag_pred_prob_test, epsilon), 1 - epsilon)
+
+bag_logloss_test <- -mean(
+  y_true_test * log(bag_prob_safe_test) +
+  (1 - y_true_test) * log(1 - bag_prob_safe_test)
+)
+
+y_true_train <- ifelse(train$target == "Disease", 1, 0)
+bag_prob_safe_train <- pmin(pmax(bag_pred_prob_train, epsilon), 1 - epsilon)
+
+bag_logloss_train <- -mean(
+  y_true_train * log(bag_prob_safe_train) +
+  (1 - y_true_train) * log(1 - bag_prob_safe_train)
+)
+```
+
+# Boundaries Graph: Bagging
+```{r}
+set.seed(42)
+bag_basic <- bagging(
+  target ~ PC1 + PC2,
+  data = train,
+  nbagg = 150,     
+  coob = TRUE             
+)
+
+x_range <- seq(min(test$PC1), max(test$PC1), length.out = 500)
+y_range <- seq(min(test$PC2), max(test$PC2), length.out = 500)
+
+grid <- expand.grid(PC1 = x_range, PC2 = y_range)
+
+grid$pred_class <- predict(bag_basic, newdata = grid, type = "class")
+
+ggplot() +
+
+  geom_tile(data = grid, aes(x = PC1, y = PC2, fill = pred_class), alpha = 0.3) +  
+  geom_point(data = test, aes(x = PC1, y = PC2, color = target), size = 3) +  
+  scale_color_manual(values = c("NoDisease" = "blue", "Disease" = "red")) +  
+  scale_fill_manual(values = c("NoDisease" = "lightblue", "Disease" = "lightcoral")) +  
+  labs(title = "Bagging Model: PCA-based Decision Boundaries", x = "PC1", y = "PC2") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  theme(legend.title = element_blank())
+```
+
+# Boosting (Baseline)
+```{r}
+set.seed(42)
+
+# Convert target to numeric 0/1 for gbm
+train_gbm <- train
+test_gbm  <- test
+
+train_gbm$target <- ifelse(train$target == "Disease", 1, 0)
+test_gbm$target  <- ifelse(test$target == "Disease", 1, 0)
+
+boost_basic <- gbm(
+  formula = target ~ .,
+  data    = train_gbm,
+  distribution = "bernoulli",  # Binary classification
+  n.trees = 100,              # Number of boosting iterations 
+  interaction.depth = 1,       # Tree depth 
+  shrinkage = 0.001,            # Standard Learning rate
+  n.minobsinnode = 10,         # Minimum observations per leaf
+  bag.fraction = 0.5,          # Boosting
+  cv.folds = 0,                #  CV  
+)
+
+boost_prob <- predict(boost_basic, test, n.trees = 100, type = "response")
+boost_class <- ifelse(boost_prob > 0.5, "Disease", "NoDisease")
+boost_class <- factor(boost_class, levels = c("NoDisease", "Disease"))
+
+boost_cm <- confusionMatrix(boost_class, test$target)
+boost_cm
+
+roc_boost <- roc(test$target, boost_prob)
+
+plot(
+  roc_boost,
+  col = "#FF7F00", lwd = 2,
+  main = "ROC Curve – Boosting Model"
+)
+
+auc(roc_boost)
+```
+
+# Boosting (baseline) visualize AUC
+```{r}
+set.seed(42)
+
+# Convert target to numeric 0/1 for gbm
+train_gbm <- train
+test_gbm  <- test
+
+train_gbm$target <- ifelse(train$target == "Disease", 1, 0)
+test_gbm$target  <- ifelse(test$target == "Disease", 1, 0)
+
+boost_basic <- gbm(
+  formula = target ~ .,
+  data    = train_gbm,
+  distribution = "bernoulli",
+  n.trees = 100,
+  interaction.depth = 1,
+  shrinkage = 0.001,
+  n.minobsinnode = 10,
+  bag.fraction = 0.5,
+  cv.folds = 0,
+  verbose = FALSE
+)
+
+boost_prob_test  <- predict(boost_basic, test_gbm,  n.trees = 100, type = "response")
+boost_prob_train <- predict(boost_basic, train_gbm, n.trees = 100, type = "response")
+
+roc_boost_test  <- roc(test_gbm$target,  boost_prob_test,  direction = "<")
+roc_boost_train <- roc(train_gbm$target, boost_prob_train, direction = "<")
+
+plot(
+  roc_boost_test,
+  col = "#FF7F00", lwd = 2,
+  main = "ROC Curve – Boosting Model (Train vs Test)"
+)
+lines(roc_boost_train, col = "#1F78B4", lwd = 2)
+
+# --- AUCs + legend ---
+auc_test  <- auc(roc_boost_test)
+auc_train <- auc(roc_boost_train)
+
+legend(
+  "bottomright",
+  legend = c(
+    paste("Test  AUC =", round(auc_test, 3)),
+    paste("Train AUC =", round(auc_train, 3))
+  ),
+  col = c("#FF7F00", "#1F78B4"),
+  lwd = 2
+)
+
+# Print AUC values
+auc_test
+auc_train
+```
+
+#This part tunes the no. of tree
+```{r}
+library(caret)
+library(pROC)
+library(ggplot2)
+
+ntree_values <- c(50, 100, 200, 300, 500, 800, 1000, 1500, 2000)
+
+set.seed(42)
+
+boost_tuning <- data.frame()
+
+for (nt in ntree_values) {
+  
+  model <- gbm(
+    target ~ .,
+    data = train_gbm,
+    distribution = "bernoulli",
+    n.trees = nt,
+    interaction.depth = 2,
+    shrinkage = 0.01,
+    n.minobsinnode = 10,
+    bag.fraction = 1.0,
+    verbose = FALSE
+  )
+
+  pred_prob <- predict(model, test_gbm, n.trees = nt, type = "response")
+  pred_class <- ifelse(pred_prob > 0.5, 1, 0)
+  pred_class <- factor(pred_class, levels = c(0, 1))
+  true_factor <- factor(test_gbm$target, levels = c(0, 1))
+  
+  acc_val <- confusionMatrix(pred_class, true_factor)$overall["Accuracy"]
+  
+  # AUC
+  auc_val <- auc(roc(test_gbm$target, pred_prob))
+  
+  # LogLoss
+  epsilon <- 1e-15
+  pred_prob_safe <- pmin(pmax(pred_prob, epsilon), 1 - epsilon)
+  logloss_val <- -mean(
+    test_gbm$target * log(pred_prob_safe) +
+      (1 - test_gbm$target) * log(1 - pred_prob_safe)
+  )
+  
+  # Append all metrics
+  boost_tuning <- rbind(
+    boost_tuning,
+    data.frame(
+      n.trees = nt,
+      Accuracy = acc_val,
+      AUC = auc_val,
+      LogLoss = logloss_val
+    )
+  )
+}
+
+boost_tuning
+
+# Calculate the best value for each metric
+best_accuracy <- boost_tuning[which.max(boost_tuning$Accuracy), ]
+best_auc <- boost_tuning[which.max(boost_tuning$AUC), ]
+best_logloss <- boost_tuning[which.min(boost_tuning$LogLoss), ]
+
+# Plot for AUC
+ggplot(boost_tuning, aes(x = n.trees, y = AUC)) +
+  geom_line(color="#FF7F00", size=1.2) +
+  geom_point(color="#FF7F00", size=3) +
+  geom_vline(xintercept = best_auc$n.trees, linetype = "dashed", color = "red", size = 1) +
+  geom_point(aes(x = best_auc$n.trees, y = best_auc$AUC), color = "red", size = 4) +
+  geom_text(aes(x = best_auc$n.trees, y = best_auc$AUC, label = paste0("Best: n.trees=", best_auc$n.trees, "\nAUC=", round(best_auc$AUC, 3))), vjust = -1, color = "red", size = 5) +
+  theme_minimal(base_size=14) +
+  labs(
+    title="Boosting Tuning: n.trees vs AUC",
+    x="Number of Trees",
+    y="AUC"
+  )
+
+# Plot for Log Loss
+ggplot(boost_tuning, aes(x = n.trees, y = LogLoss)) +
+  geom_line(color="#1F78B4", size=1.2) +
+  geom_point(color="#1F78B4", size=3) +
+  geom_vline(xintercept = best_logloss$n.trees, linetype = "dashed", color = "red", size = 1) +
+  geom_point(aes(x = best_logloss$n.trees, y = best_logloss$LogLoss), color = "red", size = 4) +
+  geom_text(aes(x = best_logloss$n.trees, y = best_logloss$LogLoss, label = paste0("Best: n.trees=", best_logloss$n.trees, "\nLogLoss=", round(best_logloss$LogLoss, 4))), vjust = -1, color = "red", size = 5) +
+  theme_minimal(base_size=14) +
+  labs(
+    title="Boosting Tuning: n.trees vs LogLoss",
+    x="Number of Trees",
+    y="Cross-Entropy Loss"
+  )
+
+# Plot for Accuracy
+ggplot(boost_tuning, aes(x = n.trees, y = Accuracy)) +
+  geom_line(color="#2C7FB8", size=1.2) +
+  geom_point(color="#2C7FB8", size=3) +
+  geom_vline(xintercept = best_accuracy$n.trees, linetype = "dashed", color = "red", size = 1) +
+  geom_point(aes(x = best_accuracy$n.trees, y = best_accuracy$Accuracy), color = "red", size = 4) +
+  geom_text(aes(x = best_accuracy$n.trees, y = best_accuracy$Accuracy, label = paste0("Best: n.trees=", best_accuracy$n.trees, "\nAcc=", round(best_accuracy$Accuracy, 3))), vjust = -1, color = "red", size = 5) +
+  theme_minimal(base_size=14) +
+  labs(
+    title="Boosting Tuning: n.trees vs Accuracy",
+    x="Number of Trees",
+    y="Accuracy"
+  )
+```
+The AUC graph shows the no. of tree do not really affect the result, so 800 is the best value in this case.
+
+#This part is for tuning shrinkage and depth
+```{r}
+library(gbm)
+library(pROC)
+library(ggplot2)
+
+set.seed(42)
+
+# Shrinkage values and corresponding depth values
+shrinkage_values <- c(0.1, 0.05, 0.01, 0.005)
+depth_values <- list(
+  "0.1"  = c(1, 2, 3, 4),
+  "0.05" = c(1, 2, 3, 4),
+  "0.01" = c(1, 2, 3, 4),
+  "0.005"= c(1, 2, 3, 4)
+)
+
+grid_results <- data.frame()
+
+for (sh in shrinkage_values) {
+  for (d in depth_values[[as.character(sh)]]) {
+    
+    # Train the GBM model
+    model <- gbm(
+      target ~ .,
+      data = train_gbm,
+      distribution = "bernoulli",
+      n.trees = 800,             
+      interaction.depth = d,
+      shrinkage = sh,
+      n.minobsinnode = 10,
+      bag.fraction = 1.0,
+      verbose = FALSE
+    )
+    
+    pred_prob <- predict(model, test_gbm, n.trees = 800, type = "response")
+    pred_class <- ifelse(pred_prob > 0.5, 1, 0)  # Convert probabilities to class labels
+    
+    # AUC
+    auc_val <- auc(roc(test_gbm$target, pred_prob))
+    
+    # LogLoss (safe version)
+    epsilon <- 1e-15
+    pred_prob_safe <- pmin(pmax(pred_prob, epsilon), 1 - epsilon)
+    logloss_val <- -mean(
+      test_gbm$target * log(pred_prob_safe) +
+      (1 - test_gbm$target) * log(1 - pred_prob_safe)
+    )
+    
+    # Accuracy
+    accuracy_val <- mean(pred_class == test_gbm$target)
+    
+
+    grid_results <- rbind(
+      grid_results,
+      data.frame(
+        shrinkage = sh,
+        depth = d,
+        AUC = auc_val,
+        LogLoss = logloss_val,
+        Accuracy = accuracy_val
+      )
+    )
+  }
+}
+
+print(grid_results)
+
+# Plotting the results
+ggplot(grid_results, aes(x = factor(depth), y = factor(shrinkage), fill = LogLoss)) +
+  geom_tile() +
+  scale_fill_gradient(low = "#08519C", high = "#DEEBF7") +
+  labs(
+    title = "Boosting Grid Search (LogLoss)",
+    x = "Interaction Depth",
+    y = "Shrinkage"
+  ) +
+  theme_minimal(base_size = 14)
+
+ggplot(grid_results, aes(x = factor(depth), y = factor(shrinkage), fill = Accuracy)) +
+  geom_tile() +
+  scale_fill_gradient(low = "#FF0000", high = "#00FF00") +
+  labs(
+    title = "Boosting Grid Search (Accuracy)",
+    x = "Interaction Depth",
+    y = "Shrinkage"
+  ) +
+  theme_minimal(base_size = 14)
+
+ggplot(grid_results, aes(x = factor(depth), y = factor(shrinkage), fill = AUC)) +
+  geom_tile() +
+  scale_fill_gradient(low = "#FFF3B0", high = "#D62828") +  # pale yellow -> deep red
+  labs(
+    title = "Boosting Grid Search (AUC)",
+    x = "Interaction Depth",
+    y = "Shrinkage"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+#Final Tuning: Boosting
+```{r}
+boost_basic <- gbm(
+  formula = target ~ .,
+  data = train_gbm,
+  distribution = "bernoulli",  # Binary classification
+  n.trees = 800,              # Number of boosting iterations 
+  interaction.depth = 2,       # Tree depth 
+  shrinkage = 0.01,            # Standard Learning rate
+  n.minobsinnode = 1,         # Minimum observations per leaf
+  bag.fraction = 1,          # Boosting
+)
+
+boost_prob_test <- predict(boost_basic, test, n.trees = 800, type = "response")
+boost_class_test <- ifelse(boost_prob_test > 0.5, "Disease", "NoDisease")
+boost_class_test <- factor(boost_class_test, levels = c("NoDisease", "Disease"))
+
+# Confusion Matrix for test data
+boost_cm <- confusionMatrix(boost_class_test, test$target)
+boost_cm
+
+# ROC for test data
+roc_boost_test <- roc(test$target, boost_prob_test)
+
+plot(
+  roc_boost_test,
+  col = "#FF7F00", lwd = 2,
+  main = "ROC Curve – Boosting Model"
+)
+
+auc(roc_boost_test)
+
+boost_prob_train <- predict(boost_basic, train_gbm, n.trees = 800, type = "response")
+
+boost_class_train <- ifelse(boost_prob_train > 0.5, "Disease", "NoDisease")
+boost_class_train <- factor(boost_class_train, levels = c("NoDisease", "Disease"))
+
+# ROC for train data
+roc_boost_train <- roc(train_gbm$target, boost_prob_train)
+lines(roc_boost_train, col = "#1F78B4", lwd = 2)
+auc_train <- auc(roc_boost_train)
+
+# Display both AUC values
+legend("bottomright", 
+       legend = c(paste("Test AUC = ", round(auc(roc_boost_test), 3)),
+                  paste("Train AUC = ", round(auc_train, 3))),
+       col = c("#FF7F00", "#1F78B4"), lwd = 2)
+
+# Cross-Entropy (Log Loss) 
+y_true_test <- ifelse(test$target == "Disease", 1, 0)
+
+epsilon <- 1e-15
+boost_prob_safe_test <- pmin(pmax(boost_prob_test, epsilon), 1 - epsilon)
+
+boost_logloss_test <- -mean(
+  y_true_test * log(boost_prob_safe_test) +
+  (1 - y_true_test) * log(1 - boost_prob_safe_test)
+)
+
+# Mean Squared Error for test data
+boost_mse_test <- mean((y_true_test - boost_prob_safe_test)^2)
+
+# Cross-Entropy (Log Loss) for train data
+y_true_train <- ifelse(train_gbm$target == "Disease", 1, 0)
+
+boost_prob_safe_train <- pmin(pmax(boost_prob_train, epsilon), 1 - epsilon)
+
+boost_logloss_train <- -mean(
+  y_true_train * log(boost_prob_safe_train) +
+  (1 - y_true_train) * log(1 - boost_prob_safe_train)
+)
+
+# Results List 
+boost_results <- list(
+  Accuracy      = boost_cm$overall["Accuracy"],
+  F1_Score      = boost_cm$byClass["F1"],
+  ROC_AUC_Test  = auc(roc_boost_test),
+  Cross_Entropy_Test = boost_logloss_test
+)
+
+boost_results
+```
+
+# Boundaries Graph gbm
+```{r}
+set.seed(42)
+boost_basic <- gbm(
+  formula = target ~ .,   
+  data = train_gbm,           
+  distribution = "bernoulli", 
+  n.trees = 800,              
+  interaction.depth = 2,    
+  shrinkage = 0.01,             
+  n.minobsinnode = 1,       
+  bag.fraction = 1          
+)
+
+x_range <- seq(min(test$PC1), max(test$PC1), length.out = 500)
+y_range <- seq(min(test$PC2), max(test$PC2), length.out = 500)
+
+grid <- expand.grid(PC1 = x_range, PC2 = y_range)
+
+grid$pred_prob <- predict(boost_basic, newdata = grid, n.trees = 800, type = "response") 
+grid$pred_class <- ifelse(grid$pred_prob > 0.5, "Disease", "NoDisease")
+
+# Step 5: Plot the decision boundaries for the GBM model
+ggplot() +
+  geom_tile(data = grid, aes(x = PC1, y = PC2, fill = pred_class), alpha = 0.3) +  
+  geom_point(data = test, aes(x = PC1, y = PC2, color = factor(target)), size = 3) + 
+  scale_color_manual(values = c("NoDisease" = "blue", "Disease" = "red")) +  
+  scale_fill_manual(values = c("NoDisease" = "lightblue", "Disease" = "lightcoral")) +  
+  labs(title = "GBM Model: PCA-based Decision Boundaries", x = "PC1", y = "PC2") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  theme(legend.title = element_blank())
+```
+
+# Final result for three models
+```{r}
+library(dplyr)
+
+final_table <- data.frame(
+  Model = c("Decision Tree", "Tuned Bagging", "Tuned Boosting"),
+  
+  Accuracy = c(
+    results$Accuracy,
+    bag_results$Accuracy,
+    boost_results$Accuracy
+  ),
+  
+  F1_Score = c(
+    results$F1_Score,
+    bag_results$F1_Score,
+    boost_results$F1_Score
+  ),
+  
+  ROC_AUC = c(
+    results$ROC_AUC,
+    bag_results$ROC_AUC,
+    boost_results$ROC_AUC
+  ),
+  
+  Cross_Entropy = c(
+    results$Cross_Entropy,
+    bag_results$Cross_Entropy,
+    boost_results$Cross_Entropy
+  )
+)
+
+final_table
+```
+
+# ROC graph for three models
+```{r}
+plot(roc_tree, 
+     col = "#1F78B4", lwd = 2, 
+     main = "ROC Comparison: Tree vs Bagging vs Boosting")
+
+plot(roc_bag, 
+     col = "#33A02C", lwd = 2, 
+     add = TRUE)
+
+plot(roc_boost, 
+     col = "#FF7F00", lwd = 2, 
+     add = TRUE)
+
+legend(
+  "bottomright",
+  legend = c(
+    paste0("Decision Tree (AUC = ", round(results$ROC_AUC,3), ")"),
+    paste0("Bagging (AUC = ", round(bag_results$ROC_AUC,3), ")"),
+    paste0("Boosting (AUC = ", round(boost_results$ROC_AUC,3), ")")
+  ),
+  col = c("#1F78B4", "#33A02C", "#FF7F00"),
+  lwd = 2,
+  cex = 0.8
+)
+```
+
+# Hence PCA compresses 13 heart-disease features into 2 principal components, the decision boundary becomes low-variance and highly linear. Bagging reduces variance, but variance is already low in PCA space, so bagging does not bring additional performance gains. Boosting, on the other hand, reduces bias through sequential weak learners, which is more beneficial under PCA compression.
